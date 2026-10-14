@@ -316,7 +316,7 @@ def main():
         # The bootloader may disconnect immediately after the final block.
         destination = args.volume / "AHT10.UF2"
         copy_uf2(destination, uf2)
-        print("UF2 copy completed. Verify application USB and readings; copy success is not a hardware test.")
+        print("UF2 copy completed. Verify readings over BLE (or USB in the diagnostic build); copy success is not a hardware test.")
 
 
 if __name__ == "__main__":

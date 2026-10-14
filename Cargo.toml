@@ -10,20 +10,24 @@ path = "src/main.rs"
 test = false
 bench = false
 
+[features]
+default = []
+usb-serial = ["dep:embassy-usb", "dep:heapless", "dep:embassy-futures"]
+
 [dependencies]
 cortex-m = { version = "=0.7.9", features = ["critical-section-single-core"] }
 cortex-m-rt = { version = "=0.7.6", features = ["set-vtor"] }
 embassy-executor = { version = "=0.10.0", features = ["platform-cortex-m", "executor-thread"] }
-embassy-futures = "=0.1.2"
+embassy-futures = { version = "=0.1.2", optional = true }
 embassy-nrf = { version = "=0.11.0", features = ["nrf52840", "time-driver-rtc1", "unstable-pac"] }
 embassy-sync = "=0.8.0"
 embassy-time = "=0.5.1"
-embassy-usb = { version = "=0.6.0", default-features = false }
+embassy-usb = { version = "=0.6.0", default-features = false, optional = true }
 embedded-hal = "=1.0.0"
-heapless = "=0.8.0"
+heapless = { version = "=0.8.0", optional = true }
 
 [profile.release]
-opt-level = "s"
+opt-level = 3
 debug = 2
 lto = true
 codegen-units = 1

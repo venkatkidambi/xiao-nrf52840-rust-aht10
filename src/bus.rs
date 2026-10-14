@@ -14,6 +14,17 @@ pub struct Bus<'d> {
     scl: Peri<'d, P0_05>,
 }
 
+struct Transfer<'d>(Option<Twim<'d>>);
+
+impl Drop for Transfer<'_> {
+    fn drop(&mut self) {
+        // Also runs when the outer sample deadline cancels this future.
+        drop(self.0.take());
+        cortex_m::asm::dsb();
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 impl<'d> Bus<'d> {
     pub fn new(twim: Peri<'d, TWISPI0>, sda: Peri<'d, P0_04>, scl: Peri<'d, P0_05>) -> Self {
         Self { twim, sda, scl }
@@ -26,23 +37,24 @@ impl<'d> Bus<'d> {
         config.scl_pullup = true;
         // EasyDMA cannot read command constants from flash.
         let mut tx_ram = [0; 3];
-        let mut twim = Twim::new(
+        let mut twim = Transfer(Some(Twim::new(
             self.twim.reborrow(),
             crate::Irqs,
             self.sda.reborrow(),
             self.scl.reborrow(),
             config,
             &mut tx_ram,
-        );
-        let result =
-            with_timeout(Duration::from_millis(25), twim.transaction(0x38, &mut [op])).await;
+        )));
+        let result = with_timeout(
+            Duration::from_millis(25),
+            twim.0.as_mut().unwrap().transaction(0x38, &mut [op]),
+        )
+        .await;
         // REQUIRED: embassy-nrf 0.11's transfer future is not cancellation
         // safe by itself. Twim::drop disables the peripheral (and EasyDMA)
         // before tx_ram or the caller's RX buffer can go out of scope.
         // Reconstructing also clears stale events before the next transfer.
         drop(twim);
-        cortex_m::asm::dsb();
-        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
         result.unwrap_or(Err(twim::Error::Timeout))
     }
 

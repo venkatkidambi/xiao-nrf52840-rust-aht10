@@ -68,11 +68,18 @@ pub async fn measure(bus: &mut Bus<'_>) -> Result<Reading, Error> {
     }
     bus.write(&[0xAC, 0x33, 0x00]).await?;
     Timer::after_millis(80).await;
-    ready(bus).await?;
     let mut bytes = [0; 6];
-    bus.read(&mut bytes).await?;
-    if bytes[0] & BUSY != 0 {
-        return Err(Error::BusyTimeout);
+    let deadline = Instant::now() + Duration::from_millis(250);
+    loop {
+        // Read status and measurement in one transaction on the normal path.
+        bus.read(&mut bytes).await?;
+        if bytes[0] & BUSY == 0 {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(Error::BusyTimeout);
+        }
+        Timer::after_millis(10).await;
     }
     if bytes[0] & CALIBRATED == 0 {
         return Err(Error::NotCalibrated);

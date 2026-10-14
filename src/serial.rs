@@ -53,7 +53,8 @@ pub async fn run<'d, D: Driver<'d>>(cdc: CdcAcmClass<'d, D>, reports: &crate::Re
                         let _ = write!(
                             line,
                             "Temperature: {:.2} °C | Humidity: {:.2} %\r\n",
-                            reading.temperature_c, reading.humidity_percent
+                            reading.temperature_c(),
+                            reading.humidity_percent()
                         );
                     }
                     Err(error) => {

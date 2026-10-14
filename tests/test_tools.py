@@ -152,7 +152,7 @@ elif name == "python3":
             log.write_text("")
             env = dict(os.environ, PATH=f"{self.root}:{os.environ['PATH']}", TEST_LOG=str(log),
                        BUILD_STATUS=str(build), FLASH_STATUS=str(flash), PORT_STATUS=str(port))
-            result = subprocess.run(["sh", str(fw.ROOT / "flash.sh"), "--no-monitor"],
+            result = subprocess.run(["sh", str(fw.ROOT / "flash.sh"), "--usb-serial", "--no-monitor"],
                                     cwd=self.root, env=env, capture_output=True, text=True, timeout=10)
             calls = [json.loads(line) for line in log.read_text().splitlines()]
             flashed = ["python3", "tools/firmware.py", "flash", "--volume", "/Volumes/XIAO SENSE"] in calls
@@ -163,6 +163,18 @@ elif name == "python3":
                     self.assertEqual(calls[-1][2], "wait-port")
                 if flash == 75 and success:
                     self.assertIn("have not been read back", result.stdout)
+
+        # BLE must never wait for a USB port, and cannot certify an interrupted
+        # copy using an unrelated nearby beacon.
+        for status in (0, 75):
+            log.write_text("")
+            env.update(BUILD_STATUS="0", FLASH_STATUS=str(status))
+            result = subprocess.run(["sh", str(fw.ROOT / "flash.sh"), "--no-monitor",
+                                     "--sleep-seconds", "10", "--adv-events", "1"],
+                                    cwd=self.root, env=env, capture_output=True, text=True, timeout=10)
+            calls = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertEqual(result.returncode, status, result.stderr)
+            self.assertFalse(any("wait-port" in call or "ports" in call for call in calls))
 
 
 if __name__ == "__main__":
