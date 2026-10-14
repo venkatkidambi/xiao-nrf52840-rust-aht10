@@ -38,7 +38,9 @@ With multiple boards, select the intended volume (and optionally its application
 ./flash.sh --volume /Volumes/XIAO-SENSE --port /dev/cu.usbmodem1101
 ```
 
-Use `./flash.sh --help` for options. It also works when launched by its absolute path from another directory. It requires the tools below to be installed; Rust's pinned toolchain/dependencies may download on first use. RESET remains a physical step because this firmware does not implement a software bootloader-entry command.
+Use `./flash.sh --build-only` for an offline compile/check/ELF inspection, or `./flash.sh --help` for options. The script also works when launched by its absolute path from another directory. It requires the tools below to be installed; Rust's pinned toolchain/dependencies may download on first use. RESET remains a physical step because this firmware does not implement a software bootloader-entry command.
+
+Host tooling consists of **`flash.sh` and `tools/firmware.py`**. The shell owns the build/flash/monitor sequence; the standard-library Python utility handles USB metadata, flash-layout validation, and the ELF/UF2 binary formats. Focused regression tests live separately in `tests/test_tools.py`.
 
 ## Wiring
 
@@ -77,7 +79,7 @@ rustup component add --toolchain 1.95.0 rustfmt llvm-tools
 python3 --version
 ```
 
-The Python scripts use only the standard library. If Python or a serial terminal is missing, with Homebrew installed:
+The Python utility uses only the standard library. If Python or a serial terminal is missing, with Homebrew installed:
 
 ```sh
 brew install python picocom
@@ -107,13 +109,7 @@ python3 tools/firmware.py probe --volume "$UF2_VOLUME"
 
 ## Verify the layout, build, and generate UF2
 
-Keep the board in bootloader mode. The complete build helper performs layout discovery, formatting/check/build, ELF inspection, and UF2 conversion:
-
-```sh
-sh tools/build.sh "$UF2_VOLUME"
-```
-
-Equivalent individual commands:
+`./flash.sh` performs the complete build and flash sequence. To prepare and inspect a UF2 **without copying it to the board**, keep the board in bootloader mode and run these individual commands:
 
 ```sh
 python3 tools/firmware.py configure --volume "$UF2_VOLUME"
@@ -137,7 +133,7 @@ The backup covers the exported region, **not the MBR, bootloader, or UICR**, and
 
 The converter reads ELF `PT_LOAD` **physical/load addresses**, including the flash initializer for `.data`. It checks the initial SP, reset vector, hard-float ARM ABI, all flash/RAM segments, overlaps, and final padding. It emits 512-byte UF2 blocks with 256-byte payloads, family-present flag `0x2000`, and the nRF52840 **application family ID `0xADA52840`**. It never emits a bootloader-family image or UICR data. This follows the [UF2 format](https://github.com/microsoft/uf2/blob/master/README.md) and [Adafruit's nRF52 UF2 configuration](https://github.com/adafruit/Adafruit_nRF52_Bootloader/blob/master/src/usb/uf2/uf2cfg.h).
 
-For an offline compile-only check, run `sh tools/build.sh` without a volume. That does **not** generate a UF2 or establish compatibility with an installed board.
+For an offline compile-only check, run `./flash.sh --build-only`. That does **not** generate a UF2 or establish compatibility with an installed board.
 
 ## Flash using USB-C
 
@@ -238,7 +234,7 @@ Performed on macOS with Rust 1.95.0 on 2026-10-13:
 - `cargo build --locked --release --target thumbv7em-none-eabihf`: passed.
 - ELF inspected with the included parser, `llvm-readobj`, `llvm-size`, and reset-handler disassembly.
 - Four host tests of measurement decoding/formatting passed.
-- Fourteen Python tests of UF2/layout/ELF validation passed, using explicitly synthetic fixtures.
+- Host-tool regressions passed using synthetic fixtures and mocked flash writes. The consolidated suite has seven table-driven tests covering board identities/layouts, protected flash addresses, malformed UF2, copy errors, device selection, and build/flash/restart sequencing.
 
 The compile-only example ELF uses these addresses (ends exclusive):
 
@@ -257,7 +253,7 @@ The reset disassembly confirms VTOR relocation before Rust initialization. The E
 Reproduce the host tests without trying to run an embedded binary on macOS:
 
 ```sh
-python3 -m unittest discover -s tools -p 'test_*.py' -v
+python3 -m unittest discover -s tests -v
 mkdir -p target
 rustc --edition=2024 --test src/reading.rs -o target/reading-tests
 ./target/reading-tests
@@ -288,4 +284,4 @@ For further hardware validation, check valid readings, disconnect/reopen the ter
 | App never enumerates after a completed copy | Re-enter UF2, repeat layout discovery and build; check the bootloader handoff against its exact source |
 | Garbled degree symbol | Use a UTF-8 terminal |
 
-Project entry points are `src/main.rs`, `src/aht10.rs`, `src/bus.rs`, `src/reading.rs`, and `src/serial.rs`; build/layout utilities are in `tools/`.
+Project entry points are `src/main.rs`, `src/aht10.rs`, `src/bus.rs`, `src/reading.rs`, and `src/serial.rs`. Host tooling is `flash.sh` plus `tools/firmware.py`; host-tool regression tests are in `tests/test_tools.py`.

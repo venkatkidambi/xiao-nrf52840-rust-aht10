@@ -10,9 +10,12 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import plistlib
 import re
 import struct
+import subprocess
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 ELF = ROOT / "target/thumbv7em-none-eabihf/release/xiao-aht10"
@@ -32,6 +35,63 @@ BOARD_IDS = (
 def require(condition, message):
     if not condition:
         raise ValueError(message)
+
+
+def bootloader_volumes(root=Path("/Volumes")):
+    matches = []
+    for volume in sorted(root.iterdir()):
+        try:
+            info = (volume / "INFO_UF2.TXT").read_text()
+        except (OSError, UnicodeError):
+            continue
+        board = re.search(r"^Board-ID:\s*(\S+)", info, re.M)
+        if info.startswith("UF2 Bootloader ") and board and board[1] in BOARD_IDS:
+            matches.append(str(volume))
+    return matches
+
+
+def ports_from_registry(registry):
+    ports = set()
+
+    def walk(node, vendor=None, product=None):
+        vendor, product = node.get("idVendor", vendor), node.get("idProduct", product)
+        port = node.get("IOCalloutDevice", "")
+        if (vendor, product) == (0xC0DE, 0xCAFE) and port.startswith("/dev/cu.usbmodem"):
+            ports.add(port)
+        for child in node.get("IORegistryEntryChildren", []):
+            walk(child, vendor, product)
+
+    for root in [registry] if isinstance(registry, dict) else registry:
+        walk(root)
+    return sorted(ports)
+
+
+def application_ports():
+    data = subprocess.check_output(["ioreg", "-a", "-l", "-p", "IOService"], timeout=10)
+    return ports_from_registry(plistlib.loads(data))
+
+
+def wait_device(args):
+    is_volume = args.command == "wait-volume"
+    requested = str(args.volume.resolve()) if is_volume and args.volume else args.port
+    deadline = time.monotonic() + (120 if is_volume else 60)
+    while time.monotonic() < deadline:
+        if is_volume:
+            candidates = bootloader_volumes()
+        else:
+            candidates = [p for p in application_ports() if p not in args.exclude.splitlines()]
+            if args.volume and args.volume.exists():
+                candidates = []  # Wait for the old bootloader volume to disappear.
+        if requested:
+            candidates = [p for p in candidates if p == requested]
+        require(len(candidates) <= 1,
+                f"Multiple devices: {', '.join(candidates)}. Select one with --{'volume' if is_volume else 'port'} PATH.")
+        if candidates:
+            print(candidates[0])
+            return
+        time.sleep(1)
+    hint = "Double-press RESET and check the cable." if is_volume else "Application restart was not confirmed; check the board before retrying."
+    raise ValueError(f"Timed out waiting for {'bootloader' if is_volume else 'application'}. {hint}")
 
 
 def decode_uf2(data):
@@ -200,20 +260,28 @@ def copy_uf2(destination, uf2):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("probe", "configure", "inspect", "uf2", "flash"))
-    parser.add_argument("--volume", type=Path, help="Mounted XIAO bootloader volume; required except for inspect")
+    parser.add_argument("command", choices=("wait-volume", "ports", "wait-port", "probe", "configure", "inspect", "uf2", "flash"))
+    parser.add_argument("--volume", type=Path, help="Mounted XIAO bootloader volume")
+    parser.add_argument("--port", default="")
+    parser.add_argument("--exclude", default="", help="Existing application ports, separated by newlines")
     parser.add_argument("--elf", type=Path, default=ELF)
     parser.add_argument("--output", type=Path, default=ROOT / "artifacts/xiao-aht10.uf2")
     args = parser.parse_args()
+    if args.command == "ports":
+        print("\n".join(application_ports()))
+        return
+    if args.command.startswith("wait-"):
+        wait_device(args)
+        return
     if args.command == "inspect":
         inspect_elf(args.elf, *memory_bounds())
         print("Offline inspection only: memory.x is not evidence of an installed board layout.")
         return
     require(args.volume is not None, "--volume is required; flashing offsets are never guessed")
     layout, info, current = installed_layout(args.volume)
-    print(info.decode().strip())
-    print(json.dumps(layout, indent=2))
+    print(f"{layout['board_id']}: {layout['softdevice']}, application {layout['flash_start']:#x}..{layout['flash_end']:#x}")
     if args.command == "probe":
+        print(info.decode().strip())
         return
     start, end = layout["flash_start"], layout["flash_end"]
     if args.command == "configure":
@@ -254,8 +322,10 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except KeyboardInterrupt:
+        sys.exit(130)
     except Uf2Disconnect as error:
         print(f"NOTICE: {error}", file=sys.stderr)
         sys.exit(75)  # flash.sh verifies device reappearance; not unconditional success.
-    except (ValueError, OSError, struct.error, UnicodeError) as error:
+    except (ValueError, OSError, struct.error, UnicodeError, subprocess.SubprocessError, plistlib.InvalidFileException) as error:
         sys.exit(f"ERROR: {error}")
