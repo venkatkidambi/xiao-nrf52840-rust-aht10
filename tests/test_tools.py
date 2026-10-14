@@ -170,11 +170,39 @@ elif name == "python3":
             log.write_text("")
             env.update(BUILD_STATUS="0", FLASH_STATUS=str(status))
             result = subprocess.run(["sh", str(fw.ROOT / "flash.sh"), "--no-monitor",
-                                     "--sleep-seconds", "10", "--adv-events", "1"],
+                                     "--sleep-seconds", "10", "--delivery-window-ms", "300"],
                                     cwd=self.root, env=env, capture_output=True, text=True, timeout=10)
             calls = [json.loads(line) for line in log.read_text().splitlines()]
             self.assertEqual(result.returncode, status, result.stderr)
             self.assertFalse(any("wait-port" in call or "ports" in call for call in calls))
+
+    def test_persistent_build_selects_feature_and_forwards_settings_without_flashing(self):
+        stub = f"#!{sys.executable}\n" + '''import json, os, pathlib, sys
+with open(os.environ["TEST_LOG"], "a") as log:
+    log.write(json.dumps([pathlib.Path(sys.argv[0]).name, sys.argv[1:],
+                         {k: os.environ.get(k) for k in ("SLEEP_SECONDS", "DELIVERY_WINDOW_MS", "ACK_TIMEOUT_MS")}]) + "\\n")
+'''
+        for tool in ("cargo", "python3"):
+            path = self.root / tool
+            path.write_text(stub)
+            path.chmod(0o755)
+        log = self.root / "persistent.jsonl"
+        env = dict(os.environ, PATH=f"{self.root}:{os.environ['PATH']}", TEST_LOG=str(log))
+        script = ["sh", str(fw.ROOT / "flash.sh")]
+        result = subprocess.run(script + ["--persistent", "--build-only", "--sleep-seconds", "2",
+                                "--delivery-window-ms", "3000", "--ack-timeout-ms", "7000"],
+                                env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [json.loads(line) for line in log.read_text().splitlines()]
+        builds = [args for tool, args, _ in calls if tool == "cargo" and args[0] in ("check", "build")]
+        self.assertEqual(len(builds), 2)
+        self.assertTrue(all(args[-2:] == ["--features", "ble-persistent"] for args in builds))
+        self.assertEqual(calls[-1][:2], ["python3", ["tools/firmware.py", "inspect"]])
+        self.assertTrue(all(settings == dict(SLEEP_SECONDS="2", DELIVERY_WINDOW_MS="3000", ACK_TIMEOUT_MS="7000")
+                            for _, _, settings in calls))
+        for flags in (["--persistent", "--usb-serial"], ["--ack-timeout-ms"], ["--ack-timeout-ms", "oops"]):
+            result = subprocess.run(script + flags, env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 2, result.stderr)
 
 
 if __name__ == "__main__":

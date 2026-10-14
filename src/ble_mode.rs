@@ -1,4 +1,4 @@
-use crate::{Irqs, aht10, beacon::Beacon, bus::Bus, packet};
+use crate::{Irqs, aht10, bus::Bus, delivery::Retry, packet};
 use embassy_executor::Spawner;
 use embassy_nrf::{
     config,
@@ -6,17 +6,24 @@ use embassy_nrf::{
     pac,
     rng::Rng,
 };
-use embassy_time::{Duration, Instant, Timer, with_timeout};
+use embassy_time::{Duration, Timer, with_timeout};
+use nrf_mpsl::MultiprotocolServiceLayer;
+use static_cell::StaticCell;
 
 include!(concat!(env!("OUT_DIR"), "/settings.rs"));
 
-pub async fn run(_spawner: Spawner) {
+#[embassy_executor::task]
+async fn mpsl_task(mpsl: &'static MultiprotocolServiceLayer<'static>) -> ! {
+    mpsl.run().await
+}
+
+pub async fn run(spawner: Spawner) {
     let mut config = config::Config::default();
     config.hfclk_source = config::HfclkSource::Internal;
     config.lfclk_source = config::LfclkSource::ExternalXtal;
     config.dcdc.reg1 = true; // XIAO has the required DCC inductor.
     config.debug = config::Debug::NotConfigured;
-    let p = embassy_nrf::init(config);
+    let mut p = embassy_nrf::init(config);
     // Bootloader handoff may leave an explicitly requested HFXO running.
     pac::CLOCK.tasks_hfclkstop().write_value(1);
     pac::POWER.tasks_lowpwr().write_value(1);
@@ -53,7 +60,6 @@ pub async fn run(_spawner: Spawner) {
     mosi.set_low();
 
     let mut bus = Bus::new(p.TWISPI0, p.P0_04, p.P0_05);
-    let mut beacon = Beacon::new(p.RADIO, Irqs);
     let mut rng = Rng::new(p.RNG, Irqs);
     let mut seed = [0; 4];
     // RNG driver stops hardware on completion and on timeout cancellation.
@@ -64,54 +70,165 @@ pub async fn run(_spawner: Spawner) {
         cortex_m::peripheral::SCB::sys_reset();
     }
     let boot = u32::from_le_bytes(seed);
-    drop(rng);
-    let mut random = boot.max(1);
     let mut address = [0; 6];
     address[..4].copy_from_slice(&pac::FICR.deviceaddr(0).read().to_le_bytes());
     address[4..].copy_from_slice(&pac::FICR.deviceaddr(1).read().to_le_bytes()[..2]);
     address[5] |= 0xc0; // Random static, factory-programmed address.
 
+    let mpsl_p =
+        nrf_mpsl::Peripherals::new(p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31);
+    let lfclk = nrf_mpsl::raw::mpsl_clock_lfclk_cfg_t {
+        source: nrf_mpsl::raw::MPSL_CLOCK_LF_SRC_XTAL as u8,
+        rc_ctiv: 0,
+        rc_temp_ctiv: 0,
+        accuracy_ppm: 20,
+        skip_wait_lfclk_started: false,
+    };
+    static MPSL: StaticCell<MultiprotocolServiceLayer> = StaticCell::new();
+    let mpsl = MPSL.init(MultiprotocolServiceLayer::new(mpsl_p, Irqs, lfclk).unwrap());
+    spawner.spawn(mpsl_task(mpsl).unwrap());
+    #[cfg(not(feature = "ble-persistent"))]
+    let mut outbox = crate::delivery::Outbox::new();
+    let mut retry = Retry::new();
+    let mut controller_memory = nrf_sdc::Mem::<4720>::new();
+
     Timer::after_millis(40).await; // AHT10 power-up; only once per boot.
-    let mut initialized = false;
-    let mut sequence = 0u32;
-    loop {
-        let result = with_timeout(Duration::from_millis(600), async {
-            if !initialized {
-                aht10::initialize(&mut bus).await?;
-                initialized = true;
-            }
-            aht10::measure(&mut bus).await
-        })
-        .await;
-        let sample = match result {
-            Ok(Ok(r)) => Ok((r.temperature_centidegrees(), r.humidity_centipercent())),
-            Ok(Err(aht10::Error::I2c(_))) => Err(1),
-            Ok(Err(aht10::Error::BusyTimeout)) => Err(2),
-            Ok(Err(aht10::Error::NotCalibrated)) => Err(3),
-            Err(_) => Err(4),
-        };
-        if sample.is_err() {
-            initialized = false;
-            bus.recover().await;
-        }
-        let payload = packet::encode(address, boot, sequence, SLEEP_SECONDS, sample);
-        for event in 0..ADV_EVENTS {
-            let started = Instant::now();
-            if beacon.send(payload).await.is_err() {
-                break;
-            }
-            if event + 1 < ADV_EVENTS {
-                // BLE advInterval = 20 ms, advDelay = pseudo-random 0..10 ms.
-                random ^= random << 13;
-                random ^= random >> 17;
-                random ^= random << 5;
-                Timer::at(started + Duration::from_micros(20_000 + u64::from(random % 10_001)))
+    #[cfg(feature = "ble-persistent")]
+    {
+        use crate::ble_persistent::{self, Shared};
+        use embassy_futures::join::join;
+        use embassy_time::Instant;
+
+        let shared = Shared::new();
+        let sampling = async {
+            let mut initialized = false;
+            let mut sequence = 0u32;
+            loop {
+                let started = Instant::now();
+                let sample = sample(&mut bus, &mut initialized).await;
+                shared.push(packet::encode(boot, sequence, SLEEP_SECONDS, sample));
+                sequence = sequence.wrapping_add(1);
+                // Independent start-to-start cadence, including during an outage
+                // or a slow ACK. No catch-up bursts after a delayed conversion.
+                embassy_time::Timer::at(started + Duration::from_secs(u64::from(SLEEP_SECONDS)))
                     .await;
             }
-        }
-        sequence = sequence.wrapping_add(1);
-        // Interval is explicitly sleep AFTER the burst, not start-to-start.
-        // Executor WFE + RTC1: no USB, radio, HFXO, TWIM, or polling loop.
-        Timer::after_secs(u64::from(SLEEP_SECONDS)).await;
+        };
+        let radio = async {
+            loop {
+                shared.changed.wait().await;
+                if !retry.due() {
+                    continue;
+                }
+                let radio_peripherals = nrf_sdc::Peripherals::new(
+                    p.PPI_CH17.reborrow(),
+                    p.PPI_CH18.reborrow(),
+                    p.PPI_CH20.reborrow(),
+                    p.PPI_CH21.reborrow(),
+                    p.PPI_CH22.reborrow(),
+                    p.PPI_CH23.reborrow(),
+                    p.PPI_CH24.reborrow(),
+                    p.PPI_CH25.reborrow(),
+                    p.PPI_CH26.reborrow(),
+                    p.PPI_CH27.reborrow(),
+                    p.PPI_CH28.reborrow(),
+                    p.PPI_CH29.reborrow(),
+                );
+                let controller = nrf_sdc::Builder::new()
+                    .and_then(|b| b.support_adv().support_peripheral().peripheral_count(1))
+                    .and_then(|b| b.buffer_cfg(27, 27, 3, 3))
+                    .and_then(|b| {
+                        b.build(radio_peripherals, &mut rng, mpsl, &mut controller_memory)
+                    });
+                let progress = match controller {
+                    Ok(controller) => {
+                        ble_persistent::deliver(
+                            controller,
+                            address,
+                            &shared,
+                            DELIVERY_WINDOW_MS,
+                            ACK_TIMEOUT_MS,
+                        )
+                        .await
+                    }
+                    Err(_) => false,
+                };
+                retry.finish(progress);
+                // Retry on future samples, never spin on a signal left over
+                // from a connection that just ended. Sampling never stops.
+                shared.changed.reset();
+            }
+        };
+        join(sampling, radio).await;
     }
+
+    #[cfg(not(feature = "ble-persistent"))]
+    {
+        let mut initialized = false;
+        let mut sequence = 0u32;
+        loop {
+            let sample = sample(&mut bus, &mut initialized).await;
+            outbox.push(packet::encode(boot, sequence, SLEEP_SECONDS, sample));
+            if retry.due() {
+                let radio_peripherals = nrf_sdc::Peripherals::new(
+                    p.PPI_CH17.reborrow(),
+                    p.PPI_CH18.reborrow(),
+                    p.PPI_CH20.reborrow(),
+                    p.PPI_CH21.reborrow(),
+                    p.PPI_CH22.reborrow(),
+                    p.PPI_CH23.reborrow(),
+                    p.PPI_CH24.reborrow(),
+                    p.PPI_CH25.reborrow(),
+                    p.PPI_CH26.reborrow(),
+                    p.PPI_CH27.reborrow(),
+                    p.PPI_CH28.reborrow(),
+                    p.PPI_CH29.reborrow(),
+                );
+                let controller = nrf_sdc::Builder::new()
+                    .and_then(|b| b.support_adv().support_peripheral().peripheral_count(1))
+                    .and_then(|b| b.buffer_cfg(27, 27, 3, 3))
+                    .and_then(|b| {
+                        b.build(radio_peripherals, &mut rng, mpsl, &mut controller_memory)
+                    });
+                let progress = match controller {
+                    Ok(controller) => {
+                        crate::ble_link::deliver(
+                            controller,
+                            address,
+                            &mut outbox,
+                            DELIVERY_WINDOW_MS,
+                        )
+                        .await
+                    }
+                    Err(_) => false,
+                };
+                retry.finish(progress);
+            }
+            sequence = sequence.wrapping_add(1);
+            Timer::after_secs(u64::from(SLEEP_SECONDS)).await;
+        }
+    }
+}
+
+async fn sample(bus: &mut Bus<'_>, initialized: &mut bool) -> Result<(i16, u16), u8> {
+    let result = with_timeout(Duration::from_millis(600), async {
+        if !*initialized {
+            aht10::initialize(bus).await?;
+            *initialized = true;
+        }
+        aht10::measure(bus).await
+    })
+    .await;
+    let sample = match result {
+        Ok(Ok(r)) => Ok((r.temperature_centidegrees(), r.humidity_centipercent())),
+        Ok(Err(aht10::Error::I2c(_))) => Err(1),
+        Ok(Err(aht10::Error::BusyTimeout)) => Err(2),
+        Ok(Err(aht10::Error::NotCalibrated)) => Err(3),
+        Err(_) => Err(4),
+    };
+    if sample.is_err() {
+        *initialized = false;
+        bus.recover().await;
+    }
+    sample
 }

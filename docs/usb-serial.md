@@ -116,8 +116,8 @@ python3 tools/firmware.py probe --volume "$UF2_VOLUME"
 ```sh
 python3 tools/firmware.py configure --volume "$UF2_VOLUME"
 cargo fmt --check
-cargo check --features usb-serial --locked --target thumbv7em-none-eabihf
-cargo build --features usb-serial --locked --release --target thumbv7em-none-eabihf
+cargo check --no-default-features --features usb-serial --locked --target thumbv7em-none-eabihf
+cargo build --no-default-features --features usb-serial --locked --release --target thumbv7em-none-eabihf
 python3 tools/firmware.py inspect
 python3 tools/firmware.py uf2 --volume "$UF2_VOLUME"
 ```
@@ -232,8 +232,8 @@ On 2026-10-14, the connected board's bootloader files were read successfully: bo
 Performed on macOS with Rust 1.95.0 on 2026-10-13:
 
 - `cargo fmt --check`: passed.
-- `cargo check --features usb-serial --locked --target thumbv7em-none-eabihf`: passed.
-- `cargo build --features usb-serial --locked --release --target thumbv7em-none-eabihf`: passed.
+- `cargo check --no-default-features --features usb-serial --locked --target thumbv7em-none-eabihf`: passed.
+- `cargo build --no-default-features --features usb-serial --locked --release --target thumbv7em-none-eabihf`: passed.
 - ELF inspected with the included parser, `llvm-readobj`, `llvm-size`, and reset-handler disassembly.
 - Four host tests of measurement decoding/formatting passed.
 - Host-tool regressions passed using synthetic fixtures and mocked flash writes. The consolidated suite has seven table-driven tests covering board identities/layouts, protected flash addresses, malformed UF2, copy errors, device selection, and build/flash/restart sequencing.

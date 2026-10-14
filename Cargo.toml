@@ -11,20 +11,26 @@ test = false
 bench = false
 
 [features]
-default = []
-usb-serial = ["dep:embassy-usb", "dep:heapless", "dep:embassy-futures"]
+default = ["ble"]
+ble = ["dep:nrf-sdc", "dep:nrf-mpsl", "dep:trouble-host", "dep:static_cell"]
+ble-persistent = ["ble"]
+usb-serial = ["dep:embassy-usb", "dep:heapless", "cortex-m/critical-section-single-core"]
 
 [dependencies]
-cortex-m = { version = "=0.7.9", features = ["critical-section-single-core"] }
+cortex-m = { version = "=0.7.9" }
 cortex-m-rt = { version = "=0.7.6", features = ["set-vtor"] }
 embassy-executor = { version = "=0.10.0", features = ["platform-cortex-m", "executor-thread"] }
-embassy-futures = { version = "=0.1.2", optional = true }
+embassy-futures = { version = "=0.1.2" }
 embassy-nrf = { version = "=0.11.0", features = ["nrf52840", "time-driver-rtc1", "unstable-pac"] }
 embassy-sync = "=0.8.0"
 embassy-time = "=0.5.1"
 embassy-usb = { version = "=0.6.0", default-features = false, optional = true }
 embedded-hal = "=1.0.0"
 heapless = { version = "=0.8.0", optional = true }
+nrf-sdc = { git = "https://github.com/alexmoon/nrf-sdc.git", rev = "a22ca716c807496f98ae8d95cba5622b9fdd8a00", default-features = false, features = ["nrf52840", "peripheral"], optional = true }
+nrf-mpsl = { git = "https://github.com/alexmoon/nrf-sdc.git", rev = "a22ca716c807496f98ae8d95cba5622b9fdd8a00", features = ["critical-section-impl"], optional = true }
+trouble-host = { git = "https://github.com/embassy-rs/trouble.git", rev = "fecc67076fc1eda955ac12cbb5473803576dda5e", default-features = false, features = ["derive", "gatt", "peripheral", "default-packet-pool-size-8", "default-packet-pool-mtu-27", "l2cap-rx-queue-size-4", "l2cap-tx-queue-size-4"], optional = true }
+static_cell = { version = "=2.1.1", optional = true }
 
 [profile.release]
 opt-level = 3

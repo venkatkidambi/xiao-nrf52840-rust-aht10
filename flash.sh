@@ -5,14 +5,16 @@ cd "$(dirname "$0")"
 
 usage() {
     cat <<'EOF'
-Usage: ./flash.sh [--no-monitor | --build-only] [--sleep-seconds N] [--adv-events N]
-                  [--usb-serial] [--volume PATH] [--port PATH]
+Usage: ./flash.sh [--no-monitor | --build-only] [--sleep-seconds N] [--delivery-window-ms N]
+                  [--persistent] [--ack-timeout-ms N] [--usb-serial] [--volume PATH] [--port PATH]
 
 Connect the XIAO over USB-C. Double-press RESET when prompted.
-The script finds the bootloader, builds, flashes, and listens for BLE broadcasts.
+The script finds the bootloader, builds, flashes, then saves and acknowledges BLE readings.
 
-  --sleep-seconds N  Sleep after each BLE burst (1..604800; default 10).
-  --adv-events N    Three-channel events per reading (1..100; default 3).
+  --sleep-seconds N  Sleep between attempts, or persistent sampling period (1..604800; default 10).
+  --delivery-window-ms N  BLE deadline; persistent: advertising only (100..10000 ms; default 1500).
+  --persistent   Keep BLE connected; notify readings and sleep between events.
+  --ack-timeout-ms N  Persistent pending-data deadline (1000..60000 ms; default 5000).
   --usb-serial   Build the original USB diagnostic application instead of BLE.
   --no-monitor   Build and flash without starting a receiver/terminal.
   --build-only   Compile and inspect using memory.x; no board needed or written.
@@ -30,17 +32,20 @@ port=''
 monitor=1
 build_only=0
 usb_serial=0
+persistent=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --no-monitor) monitor=0; shift ;;
         --build-only) build_only=1; monitor=0; shift ;;
         --usb-serial) usb_serial=1; shift ;;
-        --sleep-seconds|--adv-events)
+        --persistent) persistent=1; shift ;;
+        --sleep-seconds|--delivery-window-ms|--ack-timeout-ms)
             if [ "$#" -lt 2 ]; then echo "ERROR: $1 needs an integer." >&2; exit 2; fi
             case "$2" in ''|*[!0-9]*) echo "ERROR: $1 needs a positive integer." >&2; exit 2 ;; esac
             case "$1" in
                 --sleep-seconds) export SLEEP_SECONDS="$2" ;;
-                --adv-events) export ADV_EVENTS="$2" ;;
+                --delivery-window-ms) export DELIVERY_WINDOW_MS="$2" ;;
+                --ack-timeout-ms) export ACK_TIMEOUT_MS="$2" ;;
             esac
             shift 2 ;;
         --volume|--port)
@@ -58,11 +63,19 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+if [ "$usb_serial" -eq 1 ] && [ "$persistent" -eq 1 ]; then
+    echo "ERROR: --persistent and --usb-serial are separate firmware modes." >&2
+    exit 2
+fi
+
 build() {
     cargo fmt --check
     if [ "$usb_serial" -eq 1 ]; then
-        cargo check --locked --target thumbv7em-none-eabihf --features usb-serial
-        cargo build --locked --release --target thumbv7em-none-eabihf --features usb-serial
+        cargo check --locked --target thumbv7em-none-eabihf --no-default-features --features usb-serial
+        cargo build --locked --release --target thumbv7em-none-eabihf --no-default-features --features usb-serial
+    elif [ "$persistent" -eq 1 ]; then
+        cargo check --locked --target thumbv7em-none-eabihf --features ble-persistent
+        cargo build --locked --release --target thumbv7em-none-eabihf --features ble-persistent
     else
         cargo check --locked --target thumbv7em-none-eabihf
         cargo build --locked --release --target thumbv7em-none-eabihf

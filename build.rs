@@ -10,10 +10,11 @@ fn setting(name: &str, default: u32, min: u32, max: u32) -> u32 {
 fn main() {
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let sleep = setting("SLEEP_SECONDS", 10, 1, 604800);
-    let events = setting("ADV_EVENTS", 3, 1, 100);
+    let window = setting("DELIVERY_WINDOW_MS", 1500, 100, 10000);
+    let ack = setting("ACK_TIMEOUT_MS", 5000, 1000, 60000);
     fs::write(
         out.join("settings.rs"),
-        format!("pub const SLEEP_SECONDS: u32 = {sleep};\npub const ADV_EVENTS: u32 = {events};\n"),
+        format!("pub const SLEEP_SECONDS: u32 = {sleep};\npub const DELIVERY_WINDOW_MS: u32 = {window};\n#[cfg(feature = \"ble-persistent\")]\npub const ACK_TIMEOUT_MS: u32 = {ack};\n"),
     )
     .unwrap();
     fs::copy("memory.x", out.join("memory.x")).unwrap();
